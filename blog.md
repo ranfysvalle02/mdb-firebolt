@@ -142,7 +142,7 @@ Firebolt changes what happens inside the engine: columnar storage, vectorized ex
 
 ### Why the read path matters: the same question, timed
 
-The whole argument is that a columnar engine answers this shape of question faster. That's measurable, so I measured it. [`bench.py`](./bench.py) loads the **same 500,000 nested orders** into both MongoDB and Firebolt, checks that both return byte-for-byte identical results, then times the same "units by city and promo" aggregation 30 times on each. Neither side has a secondary index.
+The whole argument is that a columnar engine answers this shape of question faster. That's measurable, so I measured it. [`bench.py`](https://github.com/ranfysvalle02/mdb-firebolt/blob/main/bench.py) loads the **same 500,000 nested orders** into both MongoDB and Firebolt, checks that both return byte-for-byte identical results, then times the same "units by city and promo" aggregation 30 times on each. Neither side has a secondary index.
 
 ```text
 Query latency over 30 runs on 500,000 rows (no secondary indexes):
@@ -153,6 +153,8 @@ Query latency over 30 runs on 500,000 rows (no secondary indexes):
 On my laptop, Firebolt answered about **33x faster at the median** — roughly 3 ms versus 100 ms. This is the honest version of the comparison, so here's what's behind it: both engines scan the full dataset with no index to help. That's not a knock on MongoDB; it's the point. A `$group` over every document is a collection scan, and a wide scan-and-aggregate is exactly the workload columnar storage and vectorized execution are built for. Give MongoDB a narrow filter on an indexed field and it shines; ask it to crunch the whole set, and you feel why the warehouse existed.
 
 This isn't a production benchmark: single-node [Firebolt Core](https://github.com/firebolt-db/firebolt-core) and MongoDB Atlas Local, both on one Apple M4 Max, 500k rows. Run it yourself and the absolute numbers will move. The gap is the part that travels.
+
+An experienced MongoDB architect will push back here: *nobody serves a hot, customer-facing aggregate from a collection scan.* Fair. I tried the first fix, a compound index on `city`, `promo.code`, and `qty`. It didn't help: the median stayed around 100 ms, and forcing the planner to use the index made it 268 ms. The real fix is a rollup, a [materialized view](https://www.mongodb.com/docs/manual/core/materialized-views/) refreshed by `$merge`, and for a question you know in advance it's fast. That's the catch. A rollup answers the question someone anticipated, at the freshness of its last refresh. On Friday morning, nobody had a rollup by `promo`, because `promo` didn't exist. An agent that asks *"units by city, promo, and hour, for orders over $50"* needs a new rollup and a new refresh job. That's the bridge again, rebuilt every time someone asks a new question. The columnar engine's argument is that the raw documents are fast enough to ask directly.
 
 ### Proof at two more scales
 
@@ -189,7 +191,7 @@ Maybe it's you.
 
 *Chapter VII · Friday, replayed*
 
-Back to Friday. [`demo.py`](./demo.py) replays it with five orders: two from yesterday, then three from this morning, when the flash sale started and the nested `promo` field first appeared. It asks the merchant's question twice, once with only yesterday's orders synced and once with everything.
+Back to Friday. [`demo.py`](https://github.com/ranfysvalle02/mdb-firebolt/blob/main/demo.py) replays it with five orders: two from yesterday, then three from this morning, when the flash sale started and the nested `promo` field first appeared. It asks the merchant's question twice, once with only yesterday's orders synced and once with everything.
 
 One note first: native MongoDB CDC is in private preview, so `sync()` plays that part by hand. The planned integration is meant to make that the platform's job, so the bridge stops being yours.
 
@@ -227,9 +229,12 @@ Same question, same SQL, different answer. Last night's data says Austin. Live d
 <details>
 <summary><strong>Run it locally</strong> (Docker + Python)</summary>
 
+Everything lives in [ranfysvalle02/mdb-firebolt](https://github.com/ranfysvalle02/mdb-firebolt).
+
 **Each run drops the `shop.orders` and `shop.bench_orders` MongoDB collections and the Firebolt `orders` and `bench_orders` tables on localhost.** Use isolated demo instances, not existing services containing data you need.
 
 ```bash
+git clone https://github.com/ranfysvalle02/mdb-firebolt.git && cd mdb-firebolt
 docker compose up -d
 pip install pymongo firebolt-sdk
 python demo.py     # the freshness story: same question, new answer
@@ -259,31 +264,26 @@ The bet in 2026 is that the gap between the data you act on and the data you ana
 | Integrated MongoDB + Firebolt, synced automatically | 🗓️ **Roadmap** ("coming months") | [MongoDB announcement](https://www.mongodb.com/company/blog/news/mongodb-acquires-firebolt) |
 | Analyze other sources and formats alongside MongoDB | 🗓️ **Roadmap** ("over time") | [MongoDB announcement](https://www.mongodb.com/company/blog/news/mongodb-acquires-firebolt) |
 | Native MongoDB CDC, exactly-once, fresh within seconds | 🧪 **Private preview** | [Firebolt docs](https://docs.firebolt.io/guides/change-data-capture/mongodb.md) |
-| Sync latency of the integrated product | ❓ **Not announced** | No target or SLA published; see [Appendix C](#appendix-c-how-fresh-is-in-sync) |
-| `JSON` type; query new nested fields with no DDL | 🧪 **Public preview** | [Firebolt docs](https://docs.firebolt.io/reference-sql/data-types/json.md); [local demo](./demo.py) |
+| Sync latency of the integrated product | ❓ **Not announced** | No latency target or SLA in the announcement |
+| `JSON` type; query new nested fields with no DDL | 🧪 **Public preview** | [Firebolt docs](https://docs.firebolt.io/reference-sql/data-types/json.md); [local demo](https://github.com/ranfysvalle02/mdb-firebolt/blob/main/demo.py) |
 | Automatic column shredding | 💬 **Vendor-stated** | CTO quote in [MongoDB announcement](https://www.mongodb.com/company/blog/news/mongodb-acquires-firebolt) |
 | Transactional aggregating indexes, automatic rewrite | ✅ **Documented** | [Firebolt docs](https://docs.firebolt.io/performance-and-observability/storage-and-indexing/aggregating-index.md) |
 | Storage/compute separation, isolated clusters | ✅ **Documented** | [Firebolt docs](https://docs.firebolt.io/overview/architecture-overview.md) |
 | Trillion rows, petabyte scale, sub-second | 🏢 **Customer reference** | Similarweb, per [MongoDB announcement](https://www.mongodb.com/company/blog/news/mongodb-acquires-firebolt) |
-| ~33x faster aggregate on 500k unindexed rows | 💻 **My laptop test** | [`bench.py`](./bench.py); identical results verified; single-node, one Apple M4 Max; not a production benchmark |
+| ~33x faster aggregate on 500k unindexed rows | 💻 **My laptop test** | [`bench.py`](https://github.com/ranfysvalle02/mdb-firebolt/blob/main/bench.py); identical results verified; single-node, one Apple M4 Max; not a production benchmark |
 | Firebolt Core, self-hosted | ✅ **Available** | [GitHub](https://github.com/firebolt-db/firebolt-core); [Elastic License 2.0](https://github.com/firebolt-db/firebolt-core/blob/main/LICENSE.md) |
 
 ## Appendix B: The pattern: build ahead, retire without sentiment
 
-Firebolt isn't MongoDB's first attempt to bring analytics closer to operational data. If you've watched the company for a while, the shape is familiar: ship something early to meet customers where they are, learn from how they use it, and replace it when a better approach comes along.
+Firebolt is MongoDB's third swing at analytics on operational data, not its first:
 
-**Analytics, round one: the BI Connector.** The [MongoDB Connector for BI](https://www.mongodb.com/docs/bi-connector/current/) let SQL tools such as Tableau query MongoDB data. It solved a real problem, and customers used it.
+1. **The [BI Connector](https://www.mongodb.com/docs/bi-connector/current/)** let SQL tools such as Tableau query MongoDB. Customers used it. It reached end of life in September 2026.
+2. **The [SQL Interface](https://www.mongodb.com/docs/sql-interface/)** replaced it with live, read-only JDBC and ODBC access, direct cluster connections, and schema updates that don't interrupt queries ([transition guide](https://www.mongodb.com/docs/sql-interface/transition-bic-to-atlas-sql/)).
+3. **Firebolt** goes further, with a separate columnar engine for sub-second, high-concurrency analytics served to applications and agents.
 
-**Analytics, round two: Atlas SQL and the SQL Interface.** The [SQL Interface](https://www.mongodb.com/docs/sql-interface/) gives BI tools live, read-only access through JDBC and ODBC, with connectors for Tableau and Power BI. According to MongoDB's [transition guide](https://www.mongodb.com/docs/sql-interface/transition-bic-to-atlas-sql/), it can connect directly to a dedicated cluster, query multiple sources through a federated database instance, and update schemas without disrupting SQL queries. The BI Connector reached end of life in September 2026.
+The willingness to retire products isn't limited to analytics. [Atlas Device SDKs and Device Sync](https://www.mongodb.com/docs/device-sdks-deprecation/) and the [Atlas Data API](https://www.mongodb.com/docs/atlas/app-services/data-api/) have also reached end of life.
 
-**Analytics, round three: Firebolt.** The first two rounds made MongoDB data accessible to SQL tools. This one adds a separate columnar engine for application-facing analytics. It's a different kind of answer, aimed at a different part of the problem: sub-second answers to many concurrent queries, served to applications and agents.
-
-The same willingness to retire products shows up outside analytics:
-
-- **Atlas Device SDKs and Device Sync** were [deprecated in September 2024](https://www.mongodb.com/docs/device-sdks-deprecation/) and reached end of life on September 30, 2025. The on-device database continues as an open source project.
-- **The Atlas Data API and HTTPS Endpoints** have [reached end of life](https://www.mongodb.com/docs/atlas/app-services/data-api/). MongoDB's [deprecation guide](https://www.mongodb.com/docs/data-api-deprecation/) points customers to drivers plus their own frameworks, cloud-native functions, or partner solutions.
-
-My read, as someone inside the company: MongoDB is willing to build ahead of demand, and willing to retire a product when the evidence says customers would be better served another way. For customers on the retired path, that's painful, and it's fair to weigh that when you evaluate anything new, including this. But it's also why I take Firebolt seriously. This is a company iterating toward a better answer for analytics, not just adding another product.
+My read, from inside the company: MongoDB builds ahead of demand and retires products when customers would be better served another way. That's painful if you're on the retired path, and you should factor it into any evaluation, including this one. It's also why I take this move seriously.
 
 ## Appendix C: Sources
 
@@ -291,4 +291,4 @@ My read, as someone inside the company: MongoDB is willing to build ahead of dem
 
 **Reporting:** [Calcalist](https://www.calcalistech.com/ctechnews/article/anq8b3yg3) · [Techzine](https://www.techzine.eu/news/analytics/145917/mongodb-acquires-firebolt-for-real-time-analytics/)
 
-**Docs:** [Firebolt JSON type](https://docs.firebolt.io/reference-sql/data-types/json.md) · [Firebolt MongoDB CDC](https://docs.firebolt.io/guides/change-data-capture/mongodb.md) · [Firebolt CDC tables](https://docs.firebolt.io/guides/change-data-capture/cdc-tables.md) · [CDC ingests view](https://docs.firebolt.io/reference-sql/information-schema/cdc-ingests.md) · [MongoDB change streams](https://www.mongodb.com/docs/manual/changeStreams/) · [Aggregating indexes](https://docs.firebolt.io/performance-and-observability/storage-and-indexing/aggregating-index.md) · [Firebolt architecture](https://docs.firebolt.io/overview/architecture-overview.md) · [Firebolt Core](https://github.com/firebolt-db/firebolt-core) · [MongoDB BI Connector](https://www.mongodb.com/docs/bi-connector/current/) · [MongoDB SQL Interface](https://www.mongodb.com/docs/sql-interface/) · [Atlas analytics nodes](https://www.mongodb.com/docs/atlas/reference/replica-set-tags/) · [Why MongoDB acquired Voyage AI](https://www.mongodb.com/company/blog/news/redefining-database-ai-why-mongodb-acquired-voyage-ai)
+**Docs:** [Firebolt JSON type](https://docs.firebolt.io/reference-sql/data-types/json.md) · [Firebolt MongoDB CDC](https://docs.firebolt.io/guides/change-data-capture/mongodb.md) · [MongoDB change streams](https://www.mongodb.com/docs/manual/changeStreams/) · [Aggregating indexes](https://docs.firebolt.io/performance-and-observability/storage-and-indexing/aggregating-index.md) · [Firebolt architecture](https://docs.firebolt.io/overview/architecture-overview.md) · [Firebolt Core](https://github.com/firebolt-db/firebolt-core) · [MongoDB BI Connector](https://www.mongodb.com/docs/bi-connector/current/) · [MongoDB SQL Interface](https://www.mongodb.com/docs/sql-interface/) · [MongoDB materialized views](https://www.mongodb.com/docs/manual/core/materialized-views/) · [Atlas analytics nodes](https://www.mongodb.com/docs/atlas/reference/replica-set-tags/) · [Why MongoDB acquired Voyage AI](https://www.mongodb.com/company/blog/news/redefining-database-ai-why-mongodb-acquired-voyage-ai)
