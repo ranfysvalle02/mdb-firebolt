@@ -1,0 +1,11 @@
+services:
+  mongodb:
+    image: mongodb/mongodb-atlas-local:latest
+    ports: ["27017:27017"]
+
+  firebolt:
+    image: ghcr.io/firebolt-db/engine:dev
+    ports: ["3473:3473"]
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    security_opt: ["seccomp=unconfined"]
