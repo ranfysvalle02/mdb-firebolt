@@ -5,7 +5,7 @@ Native MongoDB CDC in Firebolt is in private preview, so sync() plays that part 
 Change streams need a replica set: MongoDB Atlas Local is one, a standalone mongod is not.
 Each run resets the demo's `orders` table and collection.
 """
-import json
+from bson.json_util import RELAXED_JSON_OPTIONS as RELAXED, dumps
 from pymongo import MongoClient
 from firebolt.db import connect
 from firebolt.client.auth import FireboltCore
@@ -38,8 +38,8 @@ with connect(auth=FireboltCore(), url="http://localhost:3473", database="firebol
         """Move `count` change events from MongoDB into Firebolt."""
         for _ in range(count):
             doc = next(stream)["fullDocument"]
-            doc.pop("_id", None)  # a BSON ObjectId isn't JSON-serializable
-            fb.execute("INSERT INTO orders VALUES (?::JSON);", [json.dumps(doc)])
+            # Relaxed Extended JSON, as native CDC stores it: ObjectId becomes {"$oid": ...}
+            fb.execute("INSERT INTO orders VALUES (?::JSON);", [dumps(doc, json_options=RELAXED)])
 
     def ask():
         fb.execute(QUESTION)

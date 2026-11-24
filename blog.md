@@ -114,6 +114,24 @@ The [local demo](#build-the-small-version) inserts documents with different shap
 
 Flexible isn't the same as forgiving, though. A malformed `qty` of `"two"` can't be cast to an integer: a plain `CAST` returns an error, while [`TRY_CAST`](https://docs.firebolt.io/reference-sql/functions-reference/conditional-and-miscellaneous/try-cast.md) returns `NULL` for a failed conversion. One fails loudly and the other returns a null, so choose on purpose.
 
+### Real documents aren't flat
+
+Real orders have line items, money, timestamps, and an `_id`, and they get updated and deleted. I tested each of these on Firebolt Core.
+
+**Arrays of nested objects** work, with one rough edge. You can index into an array directly, as in `doc.line_items[0].sku`. Aggregating across *every* element of `line_items[]` requires unnesting, and today that means a round trip through text:
+
+```sql
+SELECT JSON_VALUE((li::JSON).sku) AS sku, SUM(JSON_VALUE((li::JSON).qty)::INT) AS units
+FROM orders, UNNEST(JSON_POINTER_EXTRACT_ARRAY(doc::TEXT, '/line_items')) AS t(li)
+GROUP BY ALL;
+```
+
+It returned the correct totals. A direct `JSON`-to-`ARRAY(JSON)` cast is rejected, so it's not as clean as the dot path yet.
+
+**BSON types** arrive as [relaxed Extended JSON](https://docs.firebolt.io/guides/change-data-capture/mongodb.md). Firebolt's CDC docs say an `int` or `double` becomes a JSON number, while types JSON has no equivalent for become objects, such as `{"$numberDecimal": "1.5"}`. Dates and `ObjectId`s follow the same pattern. You extract and cast them yourself: `JSON_VALUE(doc['total']['$numberDecimal'])::NUMERIC(10,2)` and `JSON_VALUE(doc['placed_at']['$date'])::TIMESTAMPTZ` both returned the expected values. The CDC table also stores `_id` as Extended JSON in its own column. The demo below keeps `_id` the same way.
+
+**Updates and deletes** are where hand-rolled sync usually breaks, and where native CDC does the most work. According to the docs, a CDC table holds one live row per `_id`, plus the shard key on sharded collections. It applies inserts, updates, replaces, and deletes in the order MongoDB committed them. The latest change wins, and a delete removes the row. CDC reads MongoDB's pre- and post-images, so an update is never applied out of order or half-applied. The demo below handles inserts only because it plays CDC by hand; it doesn't show this behavior.
+
 ### A bookmark that only moves when you've read the page
 
 Anyone can demo data moving when everything goes right. The real question is what happens when something fails halfway through.
@@ -206,8 +224,8 @@ def sync(stream, count):
     """Move `count` change events from MongoDB into Firebolt."""
     for _ in range(count):
         doc = next(stream)["fullDocument"]
-        doc.pop("_id", None)  # a BSON ObjectId isn't JSON-serializable
-        fb.execute("INSERT INTO orders VALUES (?::JSON);", [json.dumps(doc)])
+        # Relaxed Extended JSON, as native CDC stores it: ObjectId becomes {"$oid": ...}
+        fb.execute("INSERT INTO orders VALUES (?::JSON);", [dumps(doc, json_options=RELAXED)])
 
 with col.watch() as stream:
     col.insert_many(YESTERDAY)
@@ -283,7 +301,7 @@ Firebolt is MongoDB's third swing at analytics on operational data, not its firs
 
 The willingness to retire products isn't limited to analytics. [Atlas Device SDKs and Device Sync](https://www.mongodb.com/docs/device-sdks-deprecation/) and the [Atlas Data API](https://www.mongodb.com/docs/atlas/app-services/data-api/) have also reached end of life.
 
-My read, from inside the company: MongoDB builds ahead of demand and retires products when customers would be better served another way. That's painful if you're on the retired path, and you should factor it into any evaluation, including this one. It's also why I take this move seriously.
+MongoDB builds ahead of demand and retires products when something better comes along. If you're on the retired path, factor that into any evaluation, including this one.
 
 ## Appendix C: Sources
 
